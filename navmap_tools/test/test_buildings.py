@@ -129,3 +129,24 @@ def test_osm_buildings_where_the_catastro_has_none(monkeypatch, tmp_path):
     assert source == 'OpenStreetMap'
     assert len(footprints) == 1          # building=roof is no obstacle at ground level
     assert np.allclose(footprints[0][0].max(axis=0), [6.0, 6.0], atol=0.01)
+
+
+def test_where_the_parts_fail_the_whole_buildings_are_asked(monkeypatch, tmp_path):
+    enu = EnuProjection(LAT0, LON0)
+    to_utm = Transformer.from_crs(CRS.from_epsg(4326), CRS.from_epsg(25830), always_xy=True)
+    lat, lon, _ = enu.to_geodetic(np.array([8.0, 12.0, 12.0, 8.0]),
+                                  np.array([-2.0, -2.0, 2.0, 2.0]))
+    x, y = to_utm.transform(lon, lat)
+    building = _catastro_xml([np.c_[x, y]], [0]).replace(b'BuildingPart', b'Building')
+    asked = []
+
+    def fake_get(cache, url, params, what, timeout=120.0):
+        asked.append(params['typenames'])
+        if params['typenames'] == 'BU:BuildingPart':
+            raise RuntimeError('HTTP 404')
+        return building
+    monkeypatch.setattr(bmod, '_cached_get', fake_get)
+    footprints, source = fetch_buildings('catastro', LAT0, LON0, 50.0, DiskCache(tmp_path))
+    assert source == 'Catastro'
+    assert 'BU:Building' in asked
+    assert len(footprints) == 1          # a whole building: no floors, still a footprint

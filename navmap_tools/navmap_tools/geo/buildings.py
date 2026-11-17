@@ -107,17 +107,25 @@ def fetch_catastro(lat0: float, lon0: float, radius: float, cache: DiskCache,
 
     out, seen = [], set()
 
+    def get(tb, name, typename):
+        return _cached_get(cache, CATASTRO_URL, {
+            'service': 'wfs', 'version': '2.0.0', 'request': 'GetFeature',
+            'typenames': typename, 'srsname': f'EPSG::{epsg}',
+            'bbox': '%.2f,%.2f,%.2f,%.2f,urn:ogc:def:crs:EPSG::%d' % (tuple(tb) + (epsg,))},
+            f'Catastro buildings, tile {name}')
+
     def ask(tb, name, depth=0):
         """Ask the building parts of a tile; one the service keeps failing on, in four."""
         try:
-            body = _cached_get(cache, CATASTRO_URL, {
-                'service': 'wfs', 'version': '2.0.0', 'request': 'GetFeature',
-                'typenames': 'BU:BuildingPart', 'srsname': f'EPSG::{epsg}',
-                'bbox': '%.2f,%.2f,%.2f,%.2f,urn:ogc:def:crs:EPSG::%d' % (tuple(tb) + (epsg,))},
-                f'Catastro buildings, tile {name}')
+            body = get(tb, name, 'BU:BuildingPart')
         except RuntimeError:
             if depth >= 2:
-                raise
+                # the service fails on the parts of some places (an error page) but serves their
+                # buildings: their footprints, without the floors
+                print(f'[navmap_gis_tool] Catastro buildings, tile {name}: whole buildings')
+                body = get(tb, name + ' (buildings)', 'BU:Building')
+                parse(ET.fromstring(body), 'Building')
+                return
             mx, my = (tb[0] + tb[2]) / 2, (tb[1] + tb[3]) / 2
             print(f'[navmap_gis_tool] Catastro buildings, tile {name}: asked in four')
             for k, sub in enumerate(((tb[0], tb[1], mx, my), (mx, tb[1], tb[2], my),
@@ -132,17 +140,18 @@ def fetch_catastro(lat0: float, lon0: float, radius: float, cache: DiskCache,
             if b'No records' in body:
                 return        # nothing there (rural, or a territory it does not hold)
             raise RuntimeError('Catastro buildings: ' + body[:300].decode(errors='replace'))
-        parse(root)
+        parse(root, 'BuildingPart')
 
-    def parse(root):
-        for part in root.iter('{%s}BuildingPart' % _NS['bu']):
+    def parse(root, element):
+        for part in root.iter('{%s}%s' % (_NS['bu'], element)):
             pid = part.get('{%s}id' % _NS['gml'], '')
             if pid in seen:
                 continue
             seen.add(pid)
             floors = part.find('.//bu:numberOfFloorsAboveGround', _NS)
-            if floors is None or not (floors.text or '').strip().isdigit() or \
-               int(floors.text) < 1:
+            if element == 'BuildingPart' and (
+                    floors is None or not (floors.text or '').strip().isdigit() or
+                    int(floors.text) < 1):
                 continue      # underground, or a part with nothing above the ground
             for patch in part.iter('{%s}PolygonPatch' % _NS['gml']):
                 ext = patch.find('gml:exterior', _NS)
